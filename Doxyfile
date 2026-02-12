@@ -1,0 +1,11 @@
+PROJECT_NAME           = "Distributed Calculations C Library"
+OUTPUT_DIRECTORY       = docs
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+RECURSIVE              = YES
+INPUT                  = include src examples README.md
+FILE_PATTERNS          = *.h *.c *.md
+EXTRACT_ALL            = YES
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO
+

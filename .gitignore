@@ -1,0 +1,23 @@
+# Build artifacts
+bin/
+build/
+*.o
+*.a
+
+# Analyzer / diagnostics artifacts
+*.plist
+
+# Test and benchmark outputs
+tests/out/
+tests/bench/
+tests/coverage.info
+tests/coverage_html/
+
+# Documentation build output
+docs/
+
+# macOS / editor junk
+.DS_Store
+*.swp
+*.swo
+
