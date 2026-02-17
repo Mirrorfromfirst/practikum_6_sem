@@ -9,25 +9,35 @@
 #include <string.h>
 #include <unistd.h>
 
+#define PAYLOAD_BUF_SZ 900
+
 typedef struct {
     int fd;
-    int cores;
-    int worker_timeout_sec;
     int alive;
 } worker_info_t;
 
 static volatile sig_atomic_t g_stop = 0;
+static volatile sig_atomic_t g_timeout = 0;
 
 static void on_sigint(int sig) {
     (void)sig;
     g_stop = 1;
 }
 
+static void on_sigalrm(int sig) {
+    (void)sig;
+    g_timeout = 1;
+}
+
 static void broadcast(worker_info_t *ws, int n, const char *msg) {
     int i;
+    uint8_t type = NET_MSG_ABORT;
+    if (strcmp(msg, "SHUTDOWN") == 0) {
+        type = NET_MSG_SHUTDOWN;
+    }
     for (i = 0; i < n; ++i) {
         if (ws[i].alive != 0) {
-            (void)net_send_line(ws[i].fd, msg);
+            (void)net_send_packet(ws[i].fd, type, NULL, 0U, 5);
         }
     }
 }
@@ -42,24 +52,34 @@ static void close_all(worker_info_t *ws, int n) {
     }
 }
 
-int run_manager(const manager_cfg_t *mcfg, const job_cfg_t *job) {
+int run_manager(const manager_cfg_t *mcfg, const manager_ops_t *ops) {
     int listen_fd = -1;
     worker_info_t *ws = NULL;
-    uint64_t start_ms;
-    uint64_t compute_start_ms;
     int connected = 0;
     int i;
-    int total_cores = 0;
-    double total = 0.0;
+    struct sigaction sa_new;
+    struct sigaction sa_old;
 
-    if (mcfg == NULL || job == NULL || mcfg->required_workers < 1 || mcfg->max_time_sec < 1 || job->n < 1) {
+    if (mcfg == NULL || ops == NULL || ops->on_worker_hello == NULL || ops->build_task == NULL ||
+        ops->on_worker_result == NULL || mcfg->required_workers < 1 || mcfg->max_time_sec < 1) {
         return 2;
     }
 
     (void)signal(SIGINT, on_sigint);
+    memset(&sa_new, 0, sizeof(sa_new));
+    sa_new.sa_handler = on_sigalrm;
+    sigemptyset(&sa_new.sa_mask);
+    sa_new.sa_flags = 0;
+    if (sigaction(SIGALRM, &sa_new, &sa_old) != 0) {
+        return 2;
+    }
+    g_timeout = 0;
+    alarm((unsigned int)mcfg->max_time_sec);
     listen_fd = net_listen(mcfg->host, mcfg->port);
     if (listen_fd < 0) {
         perror("net_listen");
+        alarm(0U);
+        (void)sigaction(SIGALRM, &sa_old, NULL);
         return 2;
     }
 
@@ -74,19 +94,18 @@ int run_manager(const manager_cfg_t *mcfg, const job_cfg_t *job) {
 
     fprintf(stderr, "[manager] listening on %s:%s, need workers=%d\n",
             mcfg->host, mcfg->port, mcfg->required_workers);
-    start_ms = now_ms();
 
     while (connected < mcfg->required_workers) {
         int fd;
-        char line[256];
-        int cores = 1;
-        int timeout_sec = 10;
+        uint8_t msg_type = 0U;
+        uint8_t msg_payload[PAYLOAD_BUF_SZ];
+        uint32_t msg_len = 0U;
 
         if (g_stop != 0) {
             fprintf(stderr, "[manager] interrupted\n");
             goto fail;
         }
-        if (now_ms() > start_ms + (uint64_t)mcfg->max_time_sec * 1000ULL) {
+        if (g_timeout != 0) {
             fprintf(stderr, "[manager] timeout waiting workers\n");
             goto fail;
         }
@@ -94,93 +113,78 @@ int run_manager(const manager_cfg_t *mcfg, const job_cfg_t *job) {
         if (fd < 0) {
             continue;
         }
-        if (net_recv_line(fd, line, sizeof(line), 5) < 0 ||
-            sscanf(line, "HELLO cores=%d timeout=%d", &cores, &timeout_sec) != 2) {
+        if (net_recv_packet(fd, &msg_type, msg_payload, sizeof(msg_payload), &msg_len, 5) < 0) {
             close(fd);
             continue;
         }
-        if (cores < 1) {
-            cores = 1;
+        if (msg_type != NET_MSG_HELLO) {
+            close(fd);
+            continue;
         }
-        if (timeout_sec < 1) {
-            timeout_sec = 1;
+        if (ops->on_worker_hello(connected, msg_payload, (size_t)msg_len, ops->user_ctx) != 0) {
+            close(fd);
+            continue;
         }
         ws[connected].fd = fd;
-        ws[connected].cores = cores;
-        ws[connected].worker_timeout_sec = timeout_sec;
         ws[connected].alive = 1;
-        total_cores += cores;
         ++connected;
-        fprintf(stderr, "[manager] worker#%d joined cores=%d timeout=%d\n",
-                connected, cores, timeout_sec);
+        fprintf(stderr, "[manager] worker#%d joined\n", connected);
     }
 
-    compute_start_ms = now_ms();
-    {
-        double left = job->a;
-        int prefix_cores = 0;
-        long assigned_n = 0;
-        for (i = 0; i < mcfg->required_workers; ++i) {
-            char line[256];
-            double right;
-            long ni;
-            prefix_cores += ws[i].cores;
-            if (i == mcfg->required_workers - 1) {
-                right = job->b;
-                ni = job->n - assigned_n;
-            } else {
-                right = job->a + (job->b - job->a) * ((double)prefix_cores / (double)total_cores);
-                ni = (long)((double)job->n * ((double)ws[i].cores / (double)total_cores));
-                if (ni < 1) {
-                    ni = 1;
-                }
-                if (assigned_n + ni > job->n) {
-                    ni = job->n - assigned_n;
-                }
-            }
-            assigned_n += ni;
-            (void)snprintf(line, sizeof(line),
-                           "TASK id=%d a=%.17g b=%.17g n=%ld threads=%d timeout=%d",
-                           i, left, right, ni, ws[i].cores, ws[i].worker_timeout_sec);
-            if (net_send_line(ws[i].fd, line) < 0) {
-                fprintf(stderr, "[manager] send TASK failed\n");
-                goto fail_abort;
-            }
-            left = right;
+    for (i = 0; i < mcfg->required_workers; ++i) {
+        uint8_t task_payload[PAYLOAD_BUF_SZ];
+        size_t task_len = 0U;
+        if (ops->build_task(i, task_payload, sizeof(task_payload), &task_len, ops->user_ctx) != 0) {
+            fprintf(stderr, "[manager] build TASK failed\n");
+            goto fail_abort;
+        }
+        if (net_send_packet(ws[i].fd, NET_MSG_TASK, task_payload, (uint32_t)task_len, 5) < 0) {
+            fprintf(stderr, "[manager] send TASK failed\n");
+            goto fail_abort;
         }
     }
 
     for (i = 0; i < mcfg->required_workers; ++i) {
-        char line[256];
-        int id = -1;
-        double val = 0.0;
+        uint8_t msg_type = 0U;
+        uint8_t msg_payload[PAYLOAD_BUF_SZ];
+        uint32_t msg_len = 0U;
 
-        if (g_stop != 0 || now_ms() > start_ms + (uint64_t)mcfg->max_time_sec * 1000ULL) {
+        if (g_stop != 0 || g_timeout != 0) {
             fprintf(stderr, "[manager] timeout or interrupted during collect\n");
             goto fail_abort;
         }
-        if (net_recv_line(ws[i].fd, line, sizeof(line), mcfg->max_time_sec) < 0) {
+        if (net_recv_packet(ws[i].fd,
+                            &msg_type,
+                            msg_payload,
+                            sizeof(msg_payload),
+                            &msg_len,
+                            mcfg->max_time_sec) < 0) {
             fprintf(stderr, "[manager] worker#%d disconnected/timeout\n", i);
             goto fail_abort;
         }
-        if (sscanf(line, "RESULT id=%d value=%lf", &id, &val) == 2) {
-            total += val;
+        if (msg_type == NET_MSG_RESULT) {
+            if (ops->on_worker_result(i, msg_payload, (size_t)msg_len, ops->user_ctx) != 0) {
+                fprintf(stderr, "[manager] bad RESULT payload from worker#%d\n", i);
+                goto fail_abort;
+            }
             continue;
         }
-        if (strncmp(line, "ERROR ", 6) == 0) {
-            fprintf(stderr, "[manager] worker error: %s\n", line + 6);
+        if (msg_type == NET_MSG_ERROR) {
+            fprintf(stderr,
+                    "[manager] worker error: %.*s\n",
+                    (int)msg_len,
+                    (const char *)msg_payload);
         } else {
-            fprintf(stderr, "[manager] malformed reply: %s\n", line);
+            fprintf(stderr, "[manager] malformed reply type=%u\n", (unsigned)msg_type);
         }
         goto fail_abort;
     }
 
-    printf("INTEGRAL=%.12f\n", total);
-    printf("TOTAL_TIME_SEC=%.6f\n", (double)(now_ms() - compute_start_ms) / 1000.0);
-    printf("TOTAL_CORES=%d\n", total_cores);
     broadcast(ws, mcfg->required_workers, "SHUTDOWN");
     close_all(ws, mcfg->required_workers);
     close(listen_fd);
+    alarm(0U);
+    (void)sigaction(SIGALRM, &sa_old, NULL);
     free(ws);
     return 0;
 
@@ -191,6 +195,8 @@ fail:
     if (listen_fd >= 0) {
         close(listen_fd);
     }
+    alarm(0U);
+    (void)sigaction(SIGALRM, &sa_old, NULL);
     free(ws);
     return 3;
 }

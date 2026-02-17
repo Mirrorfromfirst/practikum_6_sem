@@ -38,9 +38,10 @@ BUILD_DIR := build
 SRC_DIR := src
 EX_DIR := examples
 
-LIB_SRCS := $(SRC_DIR)/net.c $(SRC_DIR)/integral.c $(SRC_DIR)/manager.c $(SRC_DIR)/worker.c
+LIB_SRCS := $(SRC_DIR)/net.c $(SRC_DIR)/manager.c $(SRC_DIR)/worker.c
 LIB_OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(LIB_SRCS))
 LIB := $(BUILD_DIR)/libdistr.a
+APP_SRCS := $(EX_DIR)/integral_app.c
 
 all: $(BIN_DIR)/manager $(BIN_DIR)/worker
 
@@ -53,11 +54,11 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c include/distr.h src/internal.h | $(BUILD_DIR)
 $(LIB): $(LIB_OBJS) | $(BUILD_DIR)
 	$(AR) rcs $@ $^
 
-$(BIN_DIR)/manager: $(EX_DIR)/manager_main.c $(LIB) | $(BIN_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS) $(LDLIBS)
+$(BIN_DIR)/manager: $(EX_DIR)/manager_main.c $(APP_SRCS) $(LIB) | $(BIN_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(EX_DIR)/manager_main.c $(APP_SRCS) $(LIB) $(LDFLAGS) $(LDLIBS)
 
-$(BIN_DIR)/worker: $(EX_DIR)/worker_main.c $(LIB) | $(BIN_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS) $(LDLIBS)
+$(BIN_DIR)/worker: $(EX_DIR)/worker_main.c $(APP_SRCS) $(LIB) | $(BIN_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(EX_DIR)/worker_main.c $(APP_SRCS) $(LIB) $(LDFLAGS) $(LDLIBS)
 
 test: all
 	bash scripts/test.sh

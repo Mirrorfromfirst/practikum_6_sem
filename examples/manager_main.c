@@ -1,4 +1,5 @@
 #include "distr.h"
+#include "integral_app.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,7 +11,12 @@ static void usage(const char *argv0) {
 
 int main(int argc, char **argv) {
     manager_cfg_t mcfg;
-    job_cfg_t job;
+    integral_job_t job;
+    integral_manager_ctx_t app_ctx;
+    manager_ops_t ops;
+    uint64_t t0;
+    uint64_t t1;
+    int rc;
     int i;
 
     if (argc < 8) {
@@ -39,6 +45,19 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
-    return run_manager(&mcfg, &job);
+    if (integral_manager_ctx_init(&app_ctx, mcfg.required_workers, job) != 0) {
+        return 2;
+    }
+    ops = integral_manager_ops(&app_ctx);
+    t0 = integral_now_ms();
+    rc = run_manager(&mcfg, &ops);
+    t1 = integral_now_ms();
+    if (rc == 0) {
+        printf("INTEGRAL=%.12f\n", app_ctx.total);
+        printf("TOTAL_TIME_SEC=%.6f\n", (double)(t1 - t0) / 1000.0);
+        printf("TOTAL_CORES=%d\n", app_ctx.total_cores);
+    }
+    integral_manager_ctx_free(&app_ctx);
+    return rc;
 }
 

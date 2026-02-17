@@ -1,4 +1,5 @@
 #include "distr.h"
+#include "integral_app.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +11,7 @@ static void usage(const char *argv0) {
 
 int main(int argc, char **argv) {
     worker_cfg_t wcfg;
+    worker_ops_t ops;
     int i;
 
     wcfg.host = "127.0.0.1";
@@ -31,6 +33,8 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
-    return run_worker(&wcfg);
+    ops = integral_worker_ops();
+    ops.user_ctx = &wcfg;
+    return run_worker(&wcfg, &ops);
 }
 
